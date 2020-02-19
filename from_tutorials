@@ -361,3 +361,63 @@ for epoch in range(N_EPOCHS):
 test_loss = evaluate(model, test_iterator, criterion)
 
 print(f'| Test Loss: {test_loss:.3f} | Test PPL: {math.exp(test_loss):7.3f} |')
+
+200219
+
+import random
+import copy
+
+batch_size = 2
+max_len = 3
+vocab = 10
+miu = 2
+epoch = 9999 # 从0开始
+
+train_data = torch.LongTensor([[1,2,9,3,4,9,0,0],[5,3,1,9,6,7,8,9]])
+train_seg  = [[0,0,0,1,1,1,0,0],[0,0,0,0,1,1,1,1]]
+train_pad  = [[1,1,1,1,1,1,0,0],[1,1,1,1,1,1,1,1]]
+train_mask = torch.LongTensor([[1,1,1,0,0,0,0,0],[1,1,1,1,0,0,0,0]])
+
+train_pos  = [3,4]
+train_tok  = torch.LongTensor([3,6])
+train_enc = train_data * train_mask # torch.Size([2, 8])
+train_mode = nn.Embedding(vocab, vocab)(train_enc) # torch.Size([2, 8, 10])
+
+train_pred = torch.randn(2,10)
+print(train_pred.shape) # torch.Size([2, 10])
+
+def train(model, iterator, optimizer, epoch, miu=2): #词汇级
+    samp = miu/(miu-1+exp(epoch/miu))
+    model.train()
+    epoch_loss, count = 0, 0
+    iter_bar = tqdm(iterator, desc='Training')
+    for _, batch in enumerate(iter_bar):
+        train_batch = copy.deepcopy(a)
+        for t in range(max_len):
+            optimizer.zero_grad()
+            output = model(batch)
+            loss = nn.CrossEntropyLoss(reduction='none')(output, train_tok)
+            loss.backward()
+            if clip:
+                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            count += 1
+            epoch_loss += loss.mean().item()
+            iter_bar.set_description('loss=%5.3f'%loss.mean().item())
+            
+            if samp > 1/(miu+1):
+                if random.random() < samp:
+                    取原始结果
+                else:
+                    取beam结果
+            else:
+                if random.random() < samp:
+                    取原始结果
+                elif random.random() < miu * samp
+                    取beam结果
+                else:
+                    取生成结果
+            返回 train_batch
+    return epoch_loss / count
+
+def valid(): #句子级
