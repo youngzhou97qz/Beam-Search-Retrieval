@@ -1,367 +1,144 @@
-from torchtext.datasets import Multi30k
-from torchtext.data import Field, BucketIterator
-
-SRC = Field(tokenize = "spacy",
-            tokenizer_language="de",
-            init_token = '<sos>',
-            eos_token = '<eos>',
-            lower = True)
-
-TRG = Field(tokenize = "spacy",
-            tokenizer_language="en",
-            init_token = '<sos>',
-            eos_token = '<eos>',
-            lower = True)
-
-train_data, valid_data, test_data = Multi30k.splits(exts = ('.de', '.en'), fields = (SRC, TRG))
-
-SRC.build_vocab(train_data, min_freq = 2)
-TRG.build_vocab(train_data, min_freq = 2)
-
+# 模型
+# bert 预训练 + transformer + generative
 import torch
+from transformers import *
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+pretrained_weights = 'bert-base-chinese'
+tokenizer = BertTokenizer.from_pretrained(pretrained_weights)      # tokenizer.vocab_size = 21128
+# input_ids = torch.tensor([tokenizer.encode("我是谁？")])
+# all_hidden_states, _ = model(input_ids)[-2:]
+# print(all_hidden_states.shape)
 
-BATCH_SIZE = 128
+def gelu(x):
+    return x * 0.5 * (1.0 + torch.erf(x / math.sqrt(2.0)))
 
-train_iterator, valid_iterator, test_iterator = BucketIterator.splits(
-    (train_data, valid_data, test_data),
-    batch_size = BATCH_SIZE,
-    device = device)
-
-import random
-from typing import Tuple
-
-import torch.nn as nn
-import torch.optim as optim
-import torch.nn.functional as F
-from torch import Tensor
-
-
-class Encoder(nn.Module):
-    def __init__(self,
-                 input_dim: int,
-                 emb_dim: int,
-                 enc_hid_dim: int,
-                 dec_hid_dim: int,
-                 dropout: float):
+class Pre_trained(nn.Module):
+    def __init__(self, model=BertModel.from_pretrained(pretrained_weights)):
         super().__init__()
+        self.model = model
+        for p in self.parameters():
+            p.requires_grad=False
+    def forward(self, input_ids):
+        input_ids = torch.tensor(input_ids).to(device)
+        hidden_states, _ = model(input_ids)[-2:]
+        return hidden_states
 
-        self.input_dim = input_dim
-        self.emb_dim = emb_dim
-        self.enc_hid_dim = enc_hid_dim
-        self.dec_hid_dim = dec_hid_dim
-        self.dropout = dropout
-
-        self.embedding = nn.Embedding(input_dim, emb_dim)
-
-        self.rnn = nn.GRU(emb_dim, enc_hid_dim, bidirectional = True)
-
-        self.fc = nn.Linear(enc_hid_dim * 2, dec_hid_dim)
-
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self,
-                src: Tensor) -> Tuple[Tensor]:
-
-        embedded = self.dropout(self.embedding(src))
-
-        outputs, hidden = self.rnn(embedded)
-
-        hidden = torch.tanh(self.fc(torch.cat((hidden[-2,:,:], hidden[-1,:,:]), dim = 1)))
-
-        return outputs, hidden
-
-
-class Attention(nn.Module):
-    def __init__(self,
-                 enc_hid_dim: int,
-                 dec_hid_dim: int,
-                 attn_dim: int):
+class MultiHeadedSelfAttention(nn.Module):
+    def __init__(self):
         super().__init__()
+        self.proj_q = nn.Linear(dim, dim)
+        self.proj_k = nn.Linear(dim, dim)
+        self.proj_v = nn.Linear(dim, dim)
+        self.drop = nn.Dropout(drop)
+        self.scores = None
+        self.n_heads = heads
+    def forward(self, x, mask):
+        q, k, v = self.proj_q(x), self.proj_k(x), self.proj_v(x)
+        q, k, v = (self.split_last(x, (self.n_heads, -1)).transpose(1, 2) for x in [q, k, v])
+        scores = q @ k.transpose(-2, -1) / np.sqrt(k.size(-1))
+        if mask is not None:
+            mask = mask[:, None, None, :].float()
+            scores -= 10000.0 * (1.0 - mask)
+        scores = self.drop(F.softmax(scores, dim=-1))
+        h = (scores @ v).transpose(1, 2).contiguous()
+        h = self.merge_last(h, 2)
+        self.scores = scores
+        return h
+    def split_last(self, x, shape):
+        shape = list(shape)
+        assert shape.count(-1) <= 1
+        if -1 in shape:
+            shape[shape.index(-1)] = int(x.size(-1) / -np.prod(shape))
+        return x.view(*x.size()[:-1], *shape)
+    def merge_last(self, x, n_dims):
+        s = x.size()
+        assert n_dims > 1 and n_dims < len(s)
+        return x.view(*s[:-n_dims], -1)
 
-        self.enc_hid_dim = enc_hid_dim
-        self.dec_hid_dim = dec_hid_dim
-
-        self.attn_in = (enc_hid_dim * 2) + dec_hid_dim
-
-        self.attn = nn.Linear(self.attn_in, attn_dim)
-
-    def forward(self,
-                decoder_hidden: Tensor,
-                encoder_outputs: Tensor) -> Tensor:
-
-        src_len = encoder_outputs.shape[0]
-
-        repeated_decoder_hidden = decoder_hidden.unsqueeze(1).repeat(1, src_len, 1)
-
-        encoder_outputs = encoder_outputs.permute(1, 0, 2)
-
-        energy = torch.tanh(self.attn(torch.cat((
-            repeated_decoder_hidden,
-            encoder_outputs),
-            dim = 2)))
-
-        attention = torch.sum(energy, dim=2)
-
-        return F.softmax(attention, dim=1)
-
-
-class Decoder(nn.Module):
-    def __init__(self,
-                 output_dim: int,
-                 emb_dim: int,
-                 enc_hid_dim: int,
-                 dec_hid_dim: int,
-                 dropout: int,
-                 attention: nn.Module):
+class PositionWiseFeedForward(nn.Module):
+    def __init__(self):
         super().__init__()
+        self.fc1 = nn.Linear(dim, dim*ffn)
+        self.fc2 = nn.Linear(dim*ffn, dim)
+    def forward(self, x):
+        return self.fc2(gelu(self.fc1(x)))
 
-        self.emb_dim = emb_dim
-        self.enc_hid_dim = enc_hid_dim
-        self.dec_hid_dim = dec_hid_dim
-        self.output_dim = output_dim
-        self.dropout = dropout
-        self.attention = attention
+class BertLayer(nn.Module):
+    def __init__(self, share='none', norm='pre'):
+        super(BertLayer, self).__init__()
+        self.share = share
+        self.norm_pos = norm
+        self.norm1 = nn.LayerNorm(dim, eps=eps)
+        self.norm2 = nn.LayerNorm(dim, eps=eps)
+        self.drop1 = nn.Dropout(drop)
+        self.drop2 = nn.Dropout(drop)
+        if self.share == 'ffn':
+            self.attention = nn.ModuleList([MultiHeadedSelfAttention() for _ in range(n_layers)])
+            self.proj = nn.ModuleList([nn.Linear(dim, dim) for _ in range(n_layers)])
+            self.feedforward = PositionWiseFeedForward()
+        elif self.share == 'att':
+            self.attention = MultiHeadedSelfAttention()
+            self.proj = nn.Linear(dim, dim)
+            self.feedforward = nn.ModuleList([PositionWiseFeedForward() for _ in range(n_layers)])
+        elif self.share == 'all':
+            self.attention = MultiHeadedSelfAttention()
+            self.proj = nn.Linear(dim, dim)
+            self.feedforward = PositionWiseFeedForward()
+        elif self.share == 'none':
+            self.attention = nn.ModuleList([MultiHeadedSelfAttention() for _ in range(n_layers)])
+            self.proj = nn.ModuleList([nn.Linear(dim, dim) for _ in range(n_layers)])
+            self.feedforward = nn.ModuleList([PositionWiseFeedForward() for _ in range(n_layers)])
+    def forward(self, hidden_states, attention_mask, layer_num):
+        attention_mask = torch.cuda.LongTensor(attention_mask)
+        if self.norm_pos == 'pre':
+            if isinstance(self.attention, nn.ModuleList):
+                h = self.proj[layer_num](self.attention[layer_num](self.norm1(hidden_states), attention_mask))
+            else:
+                h = self.proj(self.attention(self.norm1(hidden_states), attention_mask))
+            out = hidden_states + self.drop1(h)
+            if isinstance(self.feedforward, nn.ModuleList):
+                h = self.feedforward[layer_num](self.norm1(out))
+            else:
+                h = self.feedforward(self.norm1(out))
+            out = out + self.drop2(h)
+        if self.norm_pos == 'post':
+            if isinstance(self.attention, nn.ModuleList):
+                h = self.proj[layer_num](self.attention[layer_num](hidden_states, attention_mask))
+            else:
+                h = self.proj(self.attention(hidden_states, attention_mask))
+            out = self.norm1(hidden_states + self.drop1(h))
+            if isinstance(self.feedforward, nn.ModuleList):
+                h = self.feedforward[layer_num](out)
+            else:
+                h = self.feedforward(out)
+            out = self.norm2(out + self.drop2(h))
+        return out
 
-        self.embedding = nn.Embedding(output_dim, emb_dim)
-
-        self.rnn = nn.GRU((enc_hid_dim * 2) + emb_dim, dec_hid_dim)
-
-        self.out = nn.Linear(self.attention.attn_in + emb_dim, output_dim)
-
-        self.dropout = nn.Dropout(dropout)
-
-
-    def _weighted_encoder_rep(self,
-                              decoder_hidden: Tensor,
-                              encoder_outputs: Tensor) -> Tensor:
-
-        a = self.attention(decoder_hidden, encoder_outputs)
-
-        a = a.unsqueeze(1)
-
-        encoder_outputs = encoder_outputs.permute(1, 0, 2)
-
-        weighted_encoder_rep = torch.bmm(a, encoder_outputs)
-
-        weighted_encoder_rep = weighted_encoder_rep.permute(1, 0, 2)
-
-        return weighted_encoder_rep
-
-
-    def forward(self,
-                input: Tensor,
-                decoder_hidden: Tensor,
-                encoder_outputs: Tensor) -> Tuple[Tensor]:
-
-        input = input.unsqueeze(0)
-
-        embedded = self.dropout(self.embedding(input))
-
-        weighted_encoder_rep = self._weighted_encoder_rep(decoder_hidden,
-                                                          encoder_outputs)
-
-        rnn_input = torch.cat((embedded, weighted_encoder_rep), dim = 2)
-
-        output, decoder_hidden = self.rnn(rnn_input, decoder_hidden.unsqueeze(0))
-
-        embedded = embedded.squeeze(0)
-        output = output.squeeze(0)
-        weighted_encoder_rep = weighted_encoder_rep.squeeze(0)
-
-        output = self.out(torch.cat((output,
-                                     weighted_encoder_rep,
-                                     embedded), dim = 1))
-
-        return output, decoder_hidden.squeeze(0)
-
-
-class Seq2Seq(nn.Module):
-    def __init__(self,
-                 encoder: nn.Module,
-                 decoder: nn.Module,
-                 device: torch.device):
+class Final_model(nn.Module):
+    def __init__(self):
         super().__init__()
-
-        self.encoder = encoder
-        self.decoder = decoder
-        self.device = device
-
-    def forward(self,
-                src: Tensor,
-                trg: Tensor,
-                teacher_forcing_ratio: float = 0.5) -> Tensor:
-
-        batch_size = src.shape[1]
-        max_len = trg.shape[0]
-        trg_vocab_size = self.decoder.output_dim
-
-        outputs = torch.zeros(max_len, batch_size, trg_vocab_size).to(self.device)
-
-        encoder_outputs, hidden = self.encoder(src)
-
-        # first input to the decoder is the <sos> token
-        output = trg[0,:]
-
-        for t in range(1, max_len):
-            output, hidden = self.decoder(output, hidden, encoder_outputs)
-            outputs[t] = output
-            teacher_force = random.random() < teacher_forcing_ratio
-            top1 = output.max(1)[1]
-            output = (trg[t] if teacher_force else top1)
-
-        return outputs
-
-
-INPUT_DIM = len(SRC.vocab)
-OUTPUT_DIM = len(TRG.vocab)
-# ENC_EMB_DIM = 256
-# DEC_EMB_DIM = 256
-# ENC_HID_DIM = 512
-# DEC_HID_DIM = 512
-# ATTN_DIM = 64
-# ENC_DROPOUT = 0.5
-# DEC_DROPOUT = 0.5
-
-ENC_EMB_DIM = 32
-DEC_EMB_DIM = 32
-ENC_HID_DIM = 64
-DEC_HID_DIM = 64
-ATTN_DIM = 8
-ENC_DROPOUT = 0.5
-DEC_DROPOUT = 0.5
-
-enc = Encoder(INPUT_DIM, ENC_EMB_DIM, ENC_HID_DIM, DEC_HID_DIM, ENC_DROPOUT)
-
-attn = Attention(ENC_HID_DIM, DEC_HID_DIM, ATTN_DIM)
-
-dec = Decoder(OUTPUT_DIM, DEC_EMB_DIM, ENC_HID_DIM, DEC_HID_DIM, DEC_DROPOUT, attn)
-
-model = Seq2Seq(enc, dec, device).to(device)
-
-
-def init_weights(m: nn.Module):
-    for name, param in m.named_parameters():
-        if 'weight' in name:
-            nn.init.normal_(param.data, mean=0, std=0.01)
-        else:
-            nn.init.constant_(param.data, 0)
-
-
-model.apply(init_weights)
-
-optimizer = optim.Adam(model.parameters())
-
-
-def count_parameters(model: nn.Module):
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-
-print(f'The model has {count_parameters(model):,} trainable parameters')
-
-PAD_IDX = TRG.vocab.stoi['<pad>']
-
-criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
-
-import math
-import time
-
-
-def train(model: nn.Module,
-          iterator: BucketIterator,
-          optimizer: optim.Optimizer,
-          criterion: nn.Module,
-          clip: float):
-
-    model.train()
-
-    epoch_loss = 0
-
-    for _, batch in enumerate(iterator):
-
-        src = batch.src
-        trg = batch.trg
-
-        optimizer.zero_grad()
-
-        output = model(src, trg)
-
-        output = output[1:].view(-1, output.shape[-1])
-        trg = trg[1:].view(-1)
-
-        loss = criterion(output, trg)
-
-        loss.backward()
-
-        torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
-
-        optimizer.step()
-
-        epoch_loss += loss.item()
-
-    return epoch_loss / len(iterator)
-
-
-def evaluate(model: nn.Module,
-             iterator: BucketIterator,
-             criterion: nn.Module):
-
-    model.eval()
-
-    epoch_loss = 0
-
-    with torch.no_grad():
-
-        for _, batch in enumerate(iterator):
-
-            src = batch.src
-            trg = batch.trg
-
-            output = model(src, trg, 0) #turn off teacher forcing
-
-            output = output[1:].view(-1, output.shape[-1])
-            trg = trg[1:].view(-1)
-
-            loss = criterion(output, trg)
-
-            epoch_loss += loss.item()
-
-    return epoch_loss / len(iterator)
-
-
-def epoch_time(start_time: int,
-               end_time: int):
-    elapsed_time = end_time - start_time
-    elapsed_mins = int(elapsed_time / 60)
-    elapsed_secs = int(elapsed_time - (elapsed_mins * 60))
-    return elapsed_mins, elapsed_secs
-
-
-N_EPOCHS = 10
-CLIP = 1
-
-best_valid_loss = float('inf')
-
-for epoch in range(N_EPOCHS):
-
-    start_time = time.time()
-
-    train_loss = train(model, train_iterator, optimizer, criterion, CLIP)
-    valid_loss = evaluate(model, valid_iterator, criterion)
-
-    end_time = time.time()
-
-    epoch_mins, epoch_secs = epoch_time(start_time, end_time)
-
-    print(f'Epoch: {epoch+1:02} | Time: {epoch_mins}m {epoch_secs}s')
-    print(f'\tTrain Loss: {train_loss:.3f} | Train PPL: {math.exp(train_loss):7.3f}')
-    print(f'\t Val. Loss: {valid_loss:.3f} |  Val. PPL: {math.exp(valid_loss):7.3f}')
-
-test_loss = evaluate(model, test_iterator, criterion)
-
-print(f'| Test Loss: {test_loss:.3f} | Test PPL: {math.exp(test_loss):7.3f} |')
-
+        self.pre_trained = Pre_trained()
+        self.n_layers = n_layers
+        self.blocks = BertLayer(share='none', norm='pre')
+        
+        
+        self.fc2 = nn.Linear(dim, dim)
+        self.norm = nn.LayerNorm(dim, eps=eps)
+        embed_weight = self.transformer.embed.word_embeddings.weight
+        n_vocab, embed_dim = embed_weight.size()
+        self.decoder = nn.Linear(dim, embed_dim, bias=False)
+        self.decoder_2 = nn.Linear(embed_dim, n_vocab, bias=False)
+        self.decoder_2.weight = embed_weight
+        self.decoder_bias = nn.Parameter(torch.zeros(n_vocab))
+    def forward(self, input_ids, input_mask, masked_pos):
+        h = self.pre_trained(input_ids)
+        for i in range(self.n_layers):
+            h = self.blocks(h, input_mask, i)
+        masked_pos = torch.LongTensor(masked_pos)[:, :, None].expand(-1, -1, h.size(-1)).to(device)
+        h_masked = torch.gather(h, 1, masked_pos)
+        h_masked = self.norm(gelu(self.fc2(h_masked)))
+        logits_lm = self.decoder_2(self.decoder(h_masked)) + self.decoder_bias
+        return logits_lm
 200219
 
 import random
