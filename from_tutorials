@@ -1,3 +1,165 @@
+# 数据
+# read data
+questions, answers = [], []
+f = open('/home/dango/STC3/data/questions.txt','r',encoding='gbk')
+lines = f.readlines()
+for line in lines:
+    line = line.strip()
+    questions.append(line)
+f.close()
+f = open('/home/dango/STC3/data/answers.txt','r',encoding='gbk')
+lines = f.readlines()
+for line in lines:
+    line = line.strip()
+    answers.append(line)
+f.close()
+
+# judging chinese
+def check_contain_chinese(check_str):
+    for ch in check_str:
+        if u'\u4e00' <= ch <= u'\u9fff':
+            return True
+    return False
+# delete non-Chinese
+i = 0
+while 1:
+    j = len(questions)
+    if i >= j:
+        break
+    if check_contain_chinese(questions[i]) and check_contain_chinese(answers[i]):
+        i += 1
+    else:
+        questions.pop(i)
+        answers.pop(i)
+
+# standardization
+from itertools import groupby
+def pre_process(text):
+    for j in range(len(text)):
+        # expression
+        text[j] = text[j].replace('[ [', '[').replace('] ]', ']')
+        zuo, you = 0, 0
+        g = len(text[j])-1
+        while 1:
+            if text[j][g] ==  ']':
+                you = g
+            elif text[j][g] == '[':
+                zuo = g
+                for h in range(you,zuo,-1):
+                    if text[j][h] == ' ':
+                        you -= 1
+                        text[j] = text[j][:h] + text[j][h+1:]
+            if g == 0:
+                break
+            else:
+                g -= 1
+        # duplicate words
+        text[j] = text[j].split(' ')
+        text[j] = [x[0] for x in groupby(text[j])]
+        for index, string in enumerate(text[j]):
+            if len(string) > 3:
+                char_list = list(string)
+                for i in range(len(string)-3):
+                    if char_list[len(string)-1-i] == char_list[len(string)-2-i] and char_list[len(string)-1-i] == char_list[len(string)-3-i] and char_list[len(string)-1-i] == char_list[len(string)-4-i]:
+                        char_list.pop(len(string)-1-i)
+                text[j][index] = "".join(char_list)
+        g = 0
+        while 1:
+            if text[j][g] == '':
+                text[j].pop(g)
+            else:
+                g += 1
+            if g > len(text[j])-1:
+                break
+        temp = ''.join(text[j])
+        text[j] = list(temp)
+    return text
+questions = pre_process(questions)
+answers = pre_process(answers)
+
+ques = questions[:4]
+answ = answers[:4]
+for i in range(4):
+    ques[i] = ''.join(ques[i])
+    answ[i] = ''.join(answ[i])
+print(ques)
+
+# 答句2500词
+# initial dictionary
+char_answ = []
+for i in range(len(answers)):
+    for j in range(len(answers[i])):
+        char_answ.append(answers[i][j])
+answ_dict = collections.Counter(char_answ)
+# word frequency
+rest_answ = dict(filter(lambda x: (x[1] > 250 and (x[0] >= '\u4e00' and x[0] <= '\u9fff')) or (x[1] > 500 and (x[0] < '\u4e00' or x[0] > '\u9fff')), answ_dict.items()))
+print('答词典数：',len(rest_answ))
+# count = 1
+# for key in rest_answ.keys():
+#     rest_answ[key] = count
+#     count += 1
+# rest_answ['[SEP]'] = 0
+
+tokenizer=BertTokenizer.from_pretrained(pretrained_weights)
+token_id = tokenizer.convert_tokens_to_ids
+
+def gene_loader(ques, answ, batch_size, max_len):
+    count = 0
+    while count < len(ques):
+        batch = []
+        size = min(batch_size, len(ques) - count)
+        for _ in range(size):
+            part1 = tokenizer.encode(random_characters(ques[count]))
+            part2 = tokenizer.encode(answ[count])
+            truncate_tokens(part1, part2, max_len-2)
+            tokens = part1 + token_id(['[SEP]']) + part2 + token_id(['[SEP]'])
+            print(tokens)
+            segment_ids = [0]*(len(part1)+1) + [1]*(len(part2)+1)
+            print(segment_ids)
+            masked_tokens, masked_pos = [], []
+            count += 1
+            
+#             num = random.randint(len(part1+part2)+3,len(part1+part2+part3)+3)
+#             masked_pos.append(num)
+#             masked_tokens.append(tokens[num])
+#             masked_weights = [1]*len(masked_tokens)
+#             tokens[num] = token_id(['[MASK]'])[0]
+#             for i in range(num+1,len(tokens)):
+#                 tokens[i] = 0
+#             
+#             input_mask = [1]*(num+1)
+#             n_pad = gen_len - num - 1
+#             tokens.extend([0]*(gen_len - len(tokens)))
+#             segment_ids.extend([0]*n_pad)
+#             input_mask.extend([0]*n_pad)
+#             batch.append((imag_name, tokens, segment_ids, input_mask, masked_tokens, masked_pos, masked_weights))
+#             
+        yield batch
+
+def truncate_tokens(tokens_a, tokens_b, gen_len):
+    while True:
+        if len(tokens_a) + len(tokens_b) <= gen_len:
+            break
+        if len(tokens_a) > len(tokens_b):
+            tokens_a.pop()
+        else:
+            tokens_b.pop()
+
+def random_characters(token, proportion=0.14):
+    token = list(token)
+    if len(token) > 7:
+        num = min(int(len(token)*proportion), 4)
+        for _ in range(num):
+            index = random.randint(0,len(token)-1)
+            token[index] = random.choice(list(rest_answ))
+    return ''.join(token)
+
+
+
+
+a = gene_loader(ques, answ, 2, 64)
+print(next(a))
+
 # 模型
 # bert 预训练 + transformer + generative
 import torch
