@@ -1,15 +1,21 @@
-# 模型
-# bert 预训练 + transformer + generative
-import numpy as np
 import math
+import numpy as np
+from tqdm import tqdm
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim as optim
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+
 from transformers import *
+
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 pretrained_weights = 'bert-base-chinese'
 tokenizer = BertTokenizer.from_pretrained(pretrained_weights)      # tokenizer.vocab_size = 21128
+token_id = tokenizer.convert_tokens_to_ids
 
+# 模型: bert 预训练 + transformer + generative
 def gelu(x):
     return x * 0.5 * (1.0 + torch.erf(x / math.sqrt(2.0)))
 
@@ -20,8 +26,8 @@ class Pre_trained(nn.Module):
         for p in self.parameters():
             p.requires_grad=False
     def forward(self, input_ids, segment_ids):
-        input_ids = input_ids.clone().detach().to(device)
-        segment_ids = segment_ids.clone().detach().to(device)
+        input_ids = torch.tensor(input_ids).to(device)
+        segment_ids = torch.tensor(segment_ids).to(device)
         self.model.eval()
         with torch.no_grad():
             hidden_states, _ = self.model(input_ids, token_type_ids=segment_ids)
@@ -93,7 +99,7 @@ class BertLayer(nn.Module):
             self.proj = nn.ModuleList([nn.Linear(dim, dim) for _ in range(n_layers)])
             self.feedforward = nn.ModuleList([PositionWiseFeedForward() for _ in range(n_layers)])
     def forward(self, hidden_states, attention_mask, layer_num):
-        attention_mask = torch.cuda.LongTensor(attention_mask)
+        attention_mask = torch.tensor(attention_mask).to(device)
         if self.norm_pos == 'pre':
             if isinstance(self.attention, nn.ModuleList):
                 h = self.proj[layer_num](self.attention[layer_num](self.norm1(hidden_states), attention_mask))
@@ -119,7 +125,7 @@ class BertLayer(nn.Module):
         return out
 
 class Final_model(nn.Module):
-    def __init__(self, n_layers=4, dim=768, eps=1e-12, n_vocab=2500):
+    def __init__(self, n_layers=4, dim=768, eps=1e-12, n_vocab=len(char2id)):
         super().__init__()
         self.pre_trained = Pre_trained()
         self.n_layers = n_layers
@@ -137,8 +143,8 @@ class Final_model(nn.Module):
         return h_masked
 
 # model_a = Final_model().to(device)
-# a = torch.tensor([[2769, 3221, 6443, 8043],[2769, 3221, 6443, 8043]]).to(device)
-# b = torch.tensor([[1, 1, 1, 0],[1, 1, 1, 0]]).to(device)
+# a = ([[2769, 3221, 6443, 8043],[2769, 3221, 6443, 8043]])
+# b = ([[1, 1, 1, 0],[1, 1, 1, 0]])
 # c = ([[2],[3]])
 # e = model_a(a,b,b,c)
 # print(e.shape)
@@ -152,8 +158,8 @@ class Final_model(nn.Module):
 # print(get_parameter_number(BertLayer()))
 # print(get_parameter_number(Final_model()))
 
-# 数据
-# read data
+# data part
+# reading data
 questions, answers = [], []
 f = open('/home/dango/STC3/data/questions.txt','r',encoding='gbk')
 lines = f.readlines()
@@ -174,7 +180,7 @@ def check_contain_chinese(check_str):
         if u'\u4e00' <= ch <= u'\u9fff':
             return True
     return False
-# delete non-Chinese
+
 i = 0
 while 1:
     j = len(questions)
@@ -189,7 +195,7 @@ while 1:
 # standardization
 from itertools import groupby
 def pre_process(text):
-    for j in range(len(text)):
+    for j in tqdm(range(len(text)), desc='Text_processing'):
         # expression
         text[j] = text[j].replace('[ [', '[').replace('] ]', ']')
         zuo, you = 0, 0
@@ -231,6 +237,38 @@ def pre_process(text):
 questions = pre_process(questions)
 answers = pre_process(answers)
 
+# answer vocabulary
+import collections
+def get_dict(answers):
+    char_answ = []
+    for i in range(len(answers)):
+        for j in range(len(answers[i])):
+            char_answ.append(answers[i][j])
+    answ_dict = collections.Counter(char_answ)
+    rest_answ = dict(filter(lambda x: (x[1] > 250 and (x[0] >= '\u4e00' and x[0] <= '\u9fff')) or (x[1] > 500 and (x[0] < '\u4e00' or x[0] > '\u9fff')), answ_dict.items()))
+    count = 2
+    for key in rest_answ.keys():
+        rest_answ[key] = count
+        count += 1
+    rest_answ['[SEP]'], rest_answ['[OOV]'] = 0, 1
+    return rest_answ
+char2id = get_dict(answers)      # 词表大小： 2511
+id2char = {value:key for key, value in char2id.items()}
+
+# ids conversion 
+def id2id(ids, mode='bert2answ'):
+    if mode == 'bert2answ':
+        text = tokenizer.convert_ids_to_tokens([ids])[0]
+        if text in char2id.keys():
+            ids = char2id[text]
+        else:
+            ids = 1
+    elif mode == 'answ2bert':
+        text = id2char[ids]
+        ids = tokenizer.convert_tokens_to_ids(text)
+    return ids
+
+# examples
 ques = questions[:4]
 answ = answers[:4]
 for i in range(4):
@@ -238,27 +276,7 @@ for i in range(4):
     answ[i] = ''.join(answ[i])
 # print(ques)
 
-# 答句2500词
-# import collections
-# # initial dictionary
-# char_answ = []
-# for i in range(len(answers)):
-#     for j in range(len(answers[i])):
-#         char_answ.append(answers[i][j])
-# answ_dict = collections.Counter(char_answ)
-# word frequency
-# rest_answ = dict(filter(lambda x: (x[1] > 250 and (x[0] >= '\u4e00' and x[0] <= '\u9fff')) or (x[1] > 500 and (x[0] < '\u4e00' or x[0] > '\u9fff')), answ_dict.items()))
-# print('答词典数：',len(rest_answ))
-# count = 1
-# for key in rest_answ.keys():
-#     rest_answ[key] = count
-#     count += 1
-# rest_answ['[SEP]'] = 0
-
-tokenizer=BertTokenizer.from_pretrained(pretrained_weights)
-token_id = tokenizer.convert_tokens_to_ids
-
-def gene_loader(ques, answ, batch_size, max_len):
+def data_loader(ques, answ, batch_size, max_len):
     count = 0
     while count < len(ques):
         batch = []
@@ -274,14 +292,14 @@ def gene_loader(ques, answ, batch_size, max_len):
             num = len(part1)+1
             input_mask = [1]*(num+1)
             masked_tokens, masked_pos = [], []
-            masked_tokens.append(tokens[num])
+            masked_tokens.append(id2id(tokens[num], mode='bert2answ'))
             masked_pos.append(num)
             n_pad = max_len - num - 1
             tokens.extend([0]*(max_len - len(tokens)))
             temp_tokens.extend([0]*(max_len - len(temp_tokens)))
             segment_ids.extend([0]*n_pad)
             input_mask.extend([0]*n_pad) 
-            batch.append((tokens, temp_tokens, segment_ids, input_mask, masked_pos, masked_tokens))
+            batch.append((tokens, temp_tokens, segment_ids, input_mask, masked_pos, masked_tokens, len(part2)+1))
             count += 1
         yield batch
 
@@ -303,48 +321,133 @@ def truncate_tokens(tokens_a, tokens_b, max_len):
 #             token[index] = random.choice(list(rest_answ))
 #     return ''.join(token)
 
-a = gene_loader(ques, answ, 2, 64)
-print(next(a))
+# a = data_loader(ques, answ, 2, 64)
+# print(next(a))
+# tokens, temp_tokens, segment_ids, input_mask, masked_pos, masked_tokens = next(a)[0]
+# print(len(tokens),len(temp_tokens),len(segment_ids),len(input_mask),len(masked_pos),len(masked_tokens))
 
-a = gene_loader(ques, answ, 2, 64)
-tokens, temp_tokens, segment_ids, input_mask, masked_pos, masked_tokens = next(a)
-print(len(tokens),len(temp_tokens),len(segment_ids),len(input_mask),len(masked_pos),len(masked_tokens))
+def epoch_train(model, iterator, optimizer, epoch, miu=3, clip=True): #词汇级
+#     samp = miu/(miu-1+math.exp(epoch/miu))
+    model.train()
+    epoch_loss, count = 0, 0
+    iter_bar = tqdm(iterator, desc='Training')
+    for _, batch in enumerate(iter_bar):         # in a batch
+        tokens, temp_tokens, segment_ids, input_mask, masked_pos, masked_tokens, resp_len = zip(*batch)
+        tokens, masked_tokens = torch.tensor(tokens).to(device), torch.tensor(masked_tokens).to(device)
+#         train_batch = copy.deepcopy(batch)
+        for _ in range(max(resp_len)):         # in a sequence
+            optimizer.zero_grad()
+            output = model(temp_tokens, segment_ids, input_mask, masked_pos)
+            loss = nn.CrossEntropyLoss(reduction='none')(output.transpose(1, 2), masked_tokens)
+            loss = loss.mean()
+            loss.backward()
+            if clip:
+                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            count += 1
+            epoch_loss += loss.item()
+            iter_bar.set_description('loss=%3.3f'%loss.item())
+            temp_tokens, segment_ids, input_mask, masked_pos = list(temp_tokens), list(segment_ids), list(input_mask), list(masked_pos)
+            
+            if samp > 1/(miu+1):
+                if random.random() < samp:
+                    for i in range(len(resp_len)):
+                        temp_tokens[i][masked_pos[i][0]] = tokens[i][masked_pos[i][0]]
+                        segment_ids[i][masked_pos[i][0]+1] = 1
+                        input_mask[i][masked_pos[i][0]+1] = 1
+                        masked_pos[i][0] += 1
+                        masked_tokens[i][0] = id2id(tokens[i][masked_pos[i][0]], mode='bert2answ')
+                else:
+                    取beam结果?函数
+            else:
+                if random.random() < samp:
+                    for i in range(len(resp_len)):
+                        temp_tokens[i][masked_pos[i][0]] = tokens[i][masked_pos[i][0]]
+                        segment_ids[i][masked_pos[i][0]+1] = 1
+                        input_mask[i][masked_pos[i][0]+1] = 1
+                        masked_pos[i][0] += 1
+                        masked_tokens[i][0] = id2id(tokens[i][masked_pos[i][0]], mode='bert2answ')
+                elif random.random() < miu * samp
+                    取beam结果?函数
+                else:
+                    model.eval()
+                    with torch.no_grad():
+                        pred = model(temp_tokens, segment_ids, input_mask, masked_pos)
+                    model.train()
+                    out = np.argsort(pred.cpu().detach().numpy())
+                    out_list = []
+                    for i in range(len(out)):
+                        out_list.append(id2id(out[i][0][-1], mode='answ2bert'))
+                    for i in range(len(resp_len)):
+                        temp_tokens[i][masked_pos[i][0]] = out_list[i]
+                        segment_ids[i][masked_pos[i][0]+1] = 1
+                        input_mask[i][masked_pos[i][0]+1] = 1
+                        masked_pos[i][0] += 1
+                        masked_tokens[i][0] = id2id(tokens[i][masked_pos[i][0]], mode='bert2answ')
 
-# 替换问句词
-# print(ques)
-# '哈哈、生日快乐。我地居然同一日生日'
-text = ques[1]
-tokenized_text = tokenizer.tokenize(text)
+            temp_tokens, segment_ids, input_mask, masked_pos = tuple(temp_tokens), tuple(segment_ids), tuple(input_mask), tuple(masked_pos)
+            
+            
 
-# Mask a token that we will try to predict back with `BertForMaskedLM`
-masked_index = 9
-tokenized_text[masked_index] = '[MASK]'
-print(tokenized_text)
+    return epoch_loss / count
 
-# Convert token to vocabulary indices
-indexed_tokens = tokenizer.convert_tokens_to_ids(tokenized_text)
-# Define sentence A and B indices associated to 1st and 2nd sentences (see paper)
-segments_ids = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+def epoch_valid(model, iterator):
+    model.eval()
+    epoch_loss, count = 0, 0
+    with torch.no_grad():
+        iter_bar = tqdm(iterator, desc='Validation')
+        for _, batch in enumerate(iter_bar):
+            tokens, temp_tokens, segment_ids, input_mask, masked_pos, masked_tokens, resp_len = zip(*batch)
+            tokens, masked_tokens = torch.tensor(tokens).to(device), torch.tensor(masked_tokens).to(device)
+            for t in range(max(resp_len)):
+                output = model(temp_tokens, segment_ids, input_mask, masked_pos)
+                loss = nn.CrossEntropyLoss(reduction='none')(output.transpose(1, 2), masked_tokens)
+                loss = loss.mean()
+                count += 1
+                epoch_loss += loss.item()
+                iter_bar.set_description('loss=%3.3f'%loss.item())
+                temp_tokens, segment_ids, input_mask, masked_pos = list(temp_tokens), list(segment_ids), list(input_mask), list(masked_pos)
+                out = np.argsort(output.cpu().detach().numpy())
+                out_list = []
+                for i in range(len(out)):
+                    out_list.append(id2id(out[i][0][-1], mode='answ2bert'))
+                for i in range(len(resp_len)):
+                    temp_tokens[i][masked_pos[i][0]] = out_list[i]
+                    segment_ids[i][masked_pos[i][0]+1] = 1
+                    input_mask[i][masked_pos[i][0]+1] = 1
+                    masked_pos[i][0] += 1
+                    masked_tokens[i][0] = id2id(tokens[i][masked_pos[i][0]], mode='bert2answ')
+                temp_tokens, segment_ids, input_mask, masked_pos = tuple(temp_tokens), tuple(segment_ids), tuple(input_mask), tuple(masked_pos)
+    return epoch_loss / count
 
-# Convert inputs to PyTorch tensors
-tokens_tensor = torch.tensor([indexed_tokens])
-segments_tensors = torch.tensor([segments_ids])
+# def model_train(model,ques_t,answ_t,ques_v,answ_v,log_name,threshold,start,end,dict_op,loss_mode='gene'):
+def model_train(model, ques_t, answ_t, ques_v, answ_v, batch_size, max_len, learning_rate, epochs):
+#     log_file = '/home/'+user+'/CRG/self/'+log_name+'.txt'
+#     with open(log_file, 'w') as log_f:
+#         log_f.write('epoch, train_loss, valid_loss\n')
+    optimizer = optim.Adam(model.parameters(),lr=learning_rate)
+    scheduler = ReduceLROnPlateau(optimizer, factor=0.1, patience=2, verbose=True)
+    stop = 0
+    loss_list = []
+#     result_dict = {}
+    for epoch in range(epochs):
+        train_iterator = data_loader(ques_t,answ_t, batch_size, max_len)
+        valid_iterator = data_loader(ques_v,answ_v, batch_size, max_len)
+#         test_iterator = data_loader(ques_v,answ_v, batch_size, max_len)
+        print('Epoch: ' + str(epoch+1))
+        train_loss = epoch_train(model, train_iterator, optimizer, epoch)
+        valid_loss = epoch_valid(model, valid_iterator)
+        scheduler.step(valid_loss)
+        loss_list.append(valid_loss)
+#         with open(log_file, 'a') as log_f:
+#             log_f.write('{epoch},{train_loss: 3.5f},{valid_loss: 3.5f}\n'.format(epoch=epoch+1, train_loss=train_loss, valid_loss=valid_loss))
+        if valid_loss == min(loss_list):
+            stop = 0
+#             if valid_loss < threshold:
+#                 test_xx = epoch_test(model, valid_iterator)
+        else:
+            stop += 1
+            if stop > 5:       # patience**2+1
+                break
 
-# Load pre-trained model (weights)
-model = BertForMaskedLM.from_pretrained('bert-base-chinese')
-model.eval()
-
-# If you have a GPU, put everything on cuda
-tokens_tensor = tokens_tensor.to('cuda')
-segments_tensors = segments_tensors.to('cuda')
-model.to('cuda')
-
-# Predict all tokens
-with torch.no_grad():
-    outputs = model(tokens_tensor, token_type_ids=segments_tensors)
-    predictions = outputs[0]
-
-# confirm we were able to predict 'henson'
-predicted_index = torch.argmax(predictions[0, masked_index]).item()
-predicted_token = tokenizer.convert_ids_to_tokens([predicted_index])[0]
-print(predicted_token)
+model_train(Final_model().to(device), ques, answ, ques, answ, 2, 64, 0.0001, 999)
