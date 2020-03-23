@@ -1,4 +1,7 @@
+# 暂无retrieval part
+
 import math
+import random
 import numpy as np
 from tqdm import tqdm
 
@@ -14,6 +17,160 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 pretrained_weights = 'bert-base-chinese'
 tokenizer = BertTokenizer.from_pretrained(pretrained_weights)      # tokenizer.vocab_size = 21128
 token_id = tokenizer.convert_tokens_to_ids
+
+# data part
+# reading data
+questions, answers = [], []
+f = open('/home/dango/STC3/data/questions.txt','r',encoding='gbk')
+lines = f.readlines()
+for line in lines:
+    line = line.strip()
+    questions.append(line)
+f.close()
+f = open('/home/dango/STC3/data/answers.txt','r',encoding='gbk')
+lines = f.readlines()
+for line in lines:
+    line = line.strip()
+    answers.append(line)
+f.close()
+
+# judging chinese
+def check_contain_chinese(check_str):
+    length = len(check_str)
+    count = 0
+    for ch in check_str:
+        if u'\u4e00' <= ch <= u'\u9fff':
+            count += 1
+    if count >= length // 3:  # [泪]
+        return True
+    else:
+        return False
+
+i = 0
+while 1:
+    j = len(questions)
+    if i >= j:
+        break
+    if check_contain_chinese(questions[i]) and check_contain_chinese(answers[i]):
+        i += 1
+    else:
+        questions.pop(i)
+        answers.pop(i)
+
+# standardization
+from itertools import groupby
+def pre_process(text):
+    for j in range(len(text)):
+        # expression
+        text[j] = text[j].replace('[ [', '[').replace('] ]', ']')
+        # duplicate words
+        text[j] = text[j].split(' ')
+        text[j] = [x[0] for x in groupby(text[j])]
+        for index, string in enumerate(text[j]):
+            if len(string) > 3:
+                char_list = list(string)
+                for i in range(len(string)-3):
+                    if char_list[len(string)-1-i] == char_list[len(string)-2-i] and char_list[len(string)-1-i] == char_list[len(string)-3-i] and char_list[len(string)-1-i] == char_list[len(string)-4-i]:
+                        char_list.pop(len(string)-1-i)
+                text[j][index] = "".join(char_list)
+        g = 0
+        while 1:
+            if text[j][g] == '':
+                text[j].pop(g)
+            else:
+                g += 1
+            if g > len(text[j])-1:
+                break
+        temp = ''.join(text[j])
+        text[j] = list(temp)
+    return text
+questions = pre_process(questions)
+answers = pre_process(answers)
+print('问答对：', len(questions))
+
+# answer vocabulary
+import collections
+def get_dict(answers):
+    char_answ = []
+    for i in range(len(answers)):
+        for j in range(len(answers[i])):
+            char_answ.append(answers[i][j])
+    answ_dict = collections.Counter(char_answ)
+    rest_answ = dict(filter(lambda x: (x[1] > 250 and (x[0] >= '\u4e00' and x[0] <= '\u9fff')) or (x[1] > 500 and (x[0] < '\u4e00' or x[0] > '\u9fff')), answ_dict.items()))
+    count = 2
+    for key in rest_answ.keys():
+        rest_answ[key] = count
+        count += 1
+    rest_answ['[SEP]'], rest_answ['[OOV]'] = 0, 1
+    return rest_answ
+char2id = get_dict(answers)      # 词表大小： 2511
+id2char = {value:key for key, value in char2id.items()}
+print('词表数：', len(char2id))
+
+# ids conversion 
+def id2id(ids, mode='bert2answ'):
+    if mode == 'bert2answ':
+        text = tokenizer.convert_ids_to_tokens([ids])[0]
+        if text in char2id.keys():
+            ids = char2id[text]
+        else:
+            ids = 1
+    elif mode == 'answ2bert':
+        text = id2char[ids]
+        ids = tokenizer.convert_tokens_to_ids(text)
+    return ids
+
+# train & valid
+for i in range(len(questions)):
+    questions[i] = ''.join(questions[i])
+    answers[i] = ''.join(answers[i])
+train_ques, valid_ques, train_answ, valid_answ = questions[:1310720], questions[1310720:], answers[:1310720], answers[1310720:]
+
+temp = [(ques, answ) for ques, answ in zip(train_ques, train_answ)]
+temp.sort(key = lambda i: len(i[0]), reverse=True)
+train_ques = [ques for ques, answ in temp]
+train_answ = [answ for ques, answ in temp]
+
+temp = [(ques, answ) for ques, answ in zip(valid_ques, valid_answ)]
+temp.sort(key = lambda i: len(i[0]), reverse=True)
+valid_ques = [ques for ques, answ in temp]
+valid_answ = [answ for ques, answ in temp]
+
+def data_loader(ques, answ, batch_size, max_len):
+    count = 0
+    while count < len(ques):
+        batch = []
+        size = min(batch_size, len(ques) - count)
+        for _ in range(size):
+#             part1 = tokenizer.encode(random_characters(ques[count])) #改用BERT替换问句词
+            part1 = tokenizer.encode(ques[count])
+            part2 = tokenizer.encode(answ[count])
+            truncate_tokens(part1, part2, max_len-2)
+            tokens = part1 + token_id(['[SEP]']) + part2 + token_id(['[SEP]'])
+            temp_tokens = part1 + token_id(['[SEP]'])
+            num = len(part1)+1
+            segment_ids = [0]*(num) + [1]
+            input_mask = [1]*(num+1)
+            masked_tokens, masked_pos = [], []
+            masked_tokens.append(id2id(tokens[num], mode='bert2answ'))
+            masked_pos.append(num)
+            n_pad = max_len - num - 1
+            tokens.extend([0]*(max_len - len(tokens)))
+            temp_tokens.extend([0]*(max_len - len(temp_tokens)))
+            segment_ids.extend([0]*n_pad)
+            input_mask.extend([0]*n_pad) 
+            batch.append((tokens, temp_tokens, segment_ids, input_mask, masked_pos, masked_tokens, len(part2)+1))
+            count += 1
+        yield batch
+
+def truncate_tokens(tokens_a, tokens_b, max_len):
+    while True:
+        if len(tokens_a) + len(tokens_b) <= max_len:
+            break
+        if len(tokens_a) > len(tokens_b):
+            tokens_a.pop()
+        else:
+            tokens_b.pop()
 
 # 模型: bert 预训练 + transformer + generative
 def gelu(x):
@@ -137,204 +294,20 @@ class Final_model(nn.Module):
         h = self.pre_trained(input_ids, segment_ids)
         for i in range(self.n_layers):
             h = self.blocks(h, input_mask, i)
-        masked_pos = torch.LongTensor(masked_pos)[:, :, None].expand(-1, -1, h.size(-1)).to(device)
+        masked_pos = torch.tensor(masked_pos)[:, :, None].expand(-1, -1, h.size(-1)).to(device)
         h_masked = torch.gather(h, 1, masked_pos)
         h_masked = self.decoder(self.norm(gelu(self.fc2(h_masked))))
         return h_masked
 
-# model_a = Final_model().to(device)
-# a = ([[2769, 3221, 6443, 8043],[2769, 3221, 6443, 8043]])
-# b = ([[1, 1, 1, 0],[1, 1, 1, 0]])
-# c = ([[2],[3]])
-# e = model_a(a,b,b,c)
-# print(e.shape)
-
-# def get_parameter_number(net):
-#     total_num = sum(p.numel() for p in net.parameters())
-#     trainable_num = sum(p.numel() for p in net.parameters() if p.requires_grad)
-#     return {'Total': total_num, 'Trainable': trainable_num}
-# print(get_parameter_number(MultiHeadedSelfAttention()))
-# print(get_parameter_number(PositionWiseFeedForward()))
-# print(get_parameter_number(BertLayer()))
-# print(get_parameter_number(Final_model()))
-
-# data part
-# reading data
-questions, answers = [], []
-f = open('/home/dango/STC3/data/questions.txt','r',encoding='gbk')
-lines = f.readlines()
-for line in lines:
-    line = line.strip()
-    questions.append(line)
-f.close()
-f = open('/home/dango/STC3/data/answers.txt','r',encoding='gbk')
-lines = f.readlines()
-for line in lines:
-    line = line.strip()
-    answers.append(line)
-f.close()
-
-# judging chinese
-def check_contain_chinese(check_str):
-    for ch in check_str:
-        if u'\u4e00' <= ch <= u'\u9fff':
-            return True
-    return False
-
-i = 0
-while 1:
-    j = len(questions)
-    if i >= j:
-        break
-    if check_contain_chinese(questions[i]) and check_contain_chinese(answers[i]):
-        i += 1
-    else:
-        questions.pop(i)
-        answers.pop(i)
-
-# standardization
-from itertools import groupby
-def pre_process(text):
-    for j in tqdm(range(len(text)), desc='Text_processing'):
-        # expression
-        text[j] = text[j].replace('[ [', '[').replace('] ]', ']')
-        zuo, you = 0, 0
-        g = len(text[j])-1
-        while 1:
-            if text[j][g] ==  ']':
-                you = g
-            elif text[j][g] == '[':
-                zuo = g
-                for h in range(you,zuo,-1):
-                    if text[j][h] == ' ':
-                        you -= 1
-                        text[j] = text[j][:h] + text[j][h+1:]
-            if g == 0:
-                break
-            else:
-                g -= 1
-        # duplicate words
-        text[j] = text[j].split(' ')
-        text[j] = [x[0] for x in groupby(text[j])]
-        for index, string in enumerate(text[j]):
-            if len(string) > 3:
-                char_list = list(string)
-                for i in range(len(string)-3):
-                    if char_list[len(string)-1-i] == char_list[len(string)-2-i] and char_list[len(string)-1-i] == char_list[len(string)-3-i] and char_list[len(string)-1-i] == char_list[len(string)-4-i]:
-                        char_list.pop(len(string)-1-i)
-                text[j][index] = "".join(char_list)
-        g = 0
-        while 1:
-            if text[j][g] == '':
-                text[j].pop(g)
-            else:
-                g += 1
-            if g > len(text[j])-1:
-                break
-        temp = ''.join(text[j])
-        text[j] = list(temp)
-    return text
-questions = pre_process(questions)
-answers = pre_process(answers)
-
-# answer vocabulary
-import collections
-def get_dict(answers):
-    char_answ = []
-    for i in range(len(answers)):
-        for j in range(len(answers[i])):
-            char_answ.append(answers[i][j])
-    answ_dict = collections.Counter(char_answ)
-    rest_answ = dict(filter(lambda x: (x[1] > 250 and (x[0] >= '\u4e00' and x[0] <= '\u9fff')) or (x[1] > 500 and (x[0] < '\u4e00' or x[0] > '\u9fff')), answ_dict.items()))
-    count = 2
-    for key in rest_answ.keys():
-        rest_answ[key] = count
-        count += 1
-    rest_answ['[SEP]'], rest_answ['[OOV]'] = 0, 1
-    return rest_answ
-char2id = get_dict(answers)      # 词表大小： 2511
-id2char = {value:key for key, value in char2id.items()}
-
-# ids conversion 
-def id2id(ids, mode='bert2answ'):
-    if mode == 'bert2answ':
-        text = tokenizer.convert_ids_to_tokens([ids])[0]
-        if text in char2id.keys():
-            ids = char2id[text]
-        else:
-            ids = 1
-    elif mode == 'answ2bert':
-        text = id2char[ids]
-        ids = tokenizer.convert_tokens_to_ids(text)
-    return ids
-
-# examples
-ques = questions[:4]
-answ = answers[:4]
-for i in range(4):
-    ques[i] = ''.join(ques[i])
-    answ[i] = ''.join(answ[i])
-# print(ques)
-
-def data_loader(ques, answ, batch_size, max_len):
-    count = 0
-    while count < len(ques):
-        batch = []
-        size = min(batch_size, len(ques) - count)
-        for _ in range(size):
-#             part1 = tokenizer.encode(random_characters(ques[count])) #改用BERT替换问句词
-            part1 = tokenizer.encode(ques[count])
-            part2 = tokenizer.encode(answ[count])
-            truncate_tokens(part1, part2, max_len-2)
-            tokens = part1 + token_id(['[SEP]']) + part2 + token_id(['[SEP]'])
-            temp_tokens = part1 + token_id(['[SEP]'])
-            segment_ids = [0]*(len(part1)+1) + [1]
-            num = len(part1)+1
-            input_mask = [1]*(num+1)
-            masked_tokens, masked_pos = [], []
-            masked_tokens.append(id2id(tokens[num], mode='bert2answ'))
-            masked_pos.append(num)
-            n_pad = max_len - num - 1
-            tokens.extend([0]*(max_len - len(tokens)))
-            temp_tokens.extend([0]*(max_len - len(temp_tokens)))
-            segment_ids.extend([0]*n_pad)
-            input_mask.extend([0]*n_pad) 
-            batch.append((tokens, temp_tokens, segment_ids, input_mask, masked_pos, masked_tokens, len(part2)+1))
-            count += 1
-        yield batch
-
-def truncate_tokens(tokens_a, tokens_b, max_len):
-    while True:
-        if len(tokens_a) + len(tokens_b) <= max_len:
-            break
-        if len(tokens_a) > len(tokens_b):
-            tokens_a.pop()
-        else:
-            tokens_b.pop()
-
-# def random_characters(token, proportion=0.14):  # 调参
-#     token = list(token)
-#     if len(token) > 7:
-#         num = min(int(len(token)*proportion), 4)
-#         for _ in range(num):
-#             index = random.randint(0,len(token)-1)
-#             token[index] = random.choice(list(rest_answ))
-#     return ''.join(token)
-
-# a = data_loader(ques, answ, 2, 64)
-# print(next(a))
-# tokens, temp_tokens, segment_ids, input_mask, masked_pos, masked_tokens = next(a)[0]
-# print(len(tokens),len(temp_tokens),len(segment_ids),len(input_mask),len(masked_pos),len(masked_tokens))
-
-def epoch_train(model, iterator, optimizer, epoch, miu=3, clip=True): #词汇级
-#     samp = miu/(miu-1+math.exp(epoch/miu))
+def epoch_train(model, iterator, optimizer, epoch, max_len, miu=4, clip=True): #词汇级
+    samp = miu/(miu-1+math.exp(epoch/miu))
+    print('teacher force: ', samp)
     model.train()
     epoch_loss, count = 0, 0
     iter_bar = tqdm(iterator, desc='Training')
     for _, batch in enumerate(iter_bar):         # in a batch
         tokens, temp_tokens, segment_ids, input_mask, masked_pos, masked_tokens, resp_len = zip(*batch)
         tokens, masked_tokens = torch.tensor(tokens).to(device), torch.tensor(masked_tokens).to(device)
-#         train_batch = copy.deepcopy(batch)
         for _ in range(max(resp_len)):         # in a sequence
             optimizer.zero_grad()
             output = model(temp_tokens, segment_ids, input_mask, masked_pos)
@@ -348,50 +321,34 @@ def epoch_train(model, iterator, optimizer, epoch, miu=3, clip=True): #词汇级
             epoch_loss += loss.item()
             iter_bar.set_description('loss=%3.3f'%loss.item())
             temp_tokens, segment_ids, input_mask, masked_pos = list(temp_tokens), list(segment_ids), list(input_mask), list(masked_pos)
-            
-            if samp > 1/(miu+1):
-                if random.random() < samp:
-                    for i in range(len(resp_len)):
-                        temp_tokens[i][masked_pos[i][0]] = tokens[i][masked_pos[i][0]]
-                        segment_ids[i][masked_pos[i][0]+1] = 1
-                        input_mask[i][masked_pos[i][0]+1] = 1
-                        masked_pos[i][0] += 1
-                        masked_tokens[i][0] = id2id(tokens[i][masked_pos[i][0]], mode='bert2answ')
-                else:
-                    取beam结果?函数
+            if max(masked_pos)[0] == max_len - 1:
+                break
+            if random.random() < samp:
+                for i in range(len(resp_len)):
+                    temp_tokens[i][masked_pos[i][0]] = int(tokens[i][masked_pos[i][0]])
+                    segment_ids[i][masked_pos[i][0]+1] = 1
+                    input_mask[i][masked_pos[i][0]+1] = 1
+                    masked_pos[i][0] += 1
+                    masked_tokens[i][0] = id2id(int(tokens[i][masked_pos[i][0]]), mode='bert2answ')
             else:
-                if random.random() < samp:
-                    for i in range(len(resp_len)):
-                        temp_tokens[i][masked_pos[i][0]] = tokens[i][masked_pos[i][0]]
-                        segment_ids[i][masked_pos[i][0]+1] = 1
-                        input_mask[i][masked_pos[i][0]+1] = 1
-                        masked_pos[i][0] += 1
-                        masked_tokens[i][0] = id2id(tokens[i][masked_pos[i][0]], mode='bert2answ')
-                elif random.random() < miu * samp
-                    取beam结果?函数
-                else:
-                    model.eval()
-                    with torch.no_grad():
-                        pred = model(temp_tokens, segment_ids, input_mask, masked_pos)
-                    model.train()
-                    out = np.argsort(pred.cpu().detach().numpy())
-                    out_list = []
-                    for i in range(len(out)):
-                        out_list.append(id2id(out[i][0][-1], mode='answ2bert'))
-                    for i in range(len(resp_len)):
-                        temp_tokens[i][masked_pos[i][0]] = out_list[i]
-                        segment_ids[i][masked_pos[i][0]+1] = 1
-                        input_mask[i][masked_pos[i][0]+1] = 1
-                        masked_pos[i][0] += 1
-                        masked_tokens[i][0] = id2id(tokens[i][masked_pos[i][0]], mode='bert2answ')
-
+                model.eval()
+                with torch.no_grad():
+                    pred = model(temp_tokens, segment_ids, input_mask, masked_pos)
+                model.train()
+                out = np.argsort(pred.cpu().detach().numpy())
+                out_list = []
+                for i in range(len(out)):
+                    out_list.append(id2id(int(out[i][0][-1]), mode='answ2bert'))
+                for i in range(len(resp_len)):
+                    temp_tokens[i][masked_pos[i][0]] = out_list[i]
+                    segment_ids[i][masked_pos[i][0]+1] = 1
+                    input_mask[i][masked_pos[i][0]+1] = 1
+                    masked_pos[i][0] += 1
+                    masked_tokens[i][0] = id2id(int(tokens[i][masked_pos[i][0]]), mode='bert2answ')
             temp_tokens, segment_ids, input_mask, masked_pos = tuple(temp_tokens), tuple(segment_ids), tuple(input_mask), tuple(masked_pos)
-            
-            
-
     return epoch_loss / count
 
-def epoch_valid(model, iterator):
+def epoch_valid(model, iterator, max_len):
     model.eval()
     epoch_loss, count = 0, 0
     with torch.no_grad():
@@ -407,24 +364,78 @@ def epoch_valid(model, iterator):
                 epoch_loss += loss.item()
                 iter_bar.set_description('loss=%3.3f'%loss.item())
                 temp_tokens, segment_ids, input_mask, masked_pos = list(temp_tokens), list(segment_ids), list(input_mask), list(masked_pos)
+                if max(masked_pos)[0] == max_len - 1:
+                    break
                 out = np.argsort(output.cpu().detach().numpy())
                 out_list = []
                 for i in range(len(out)):
-                    out_list.append(id2id(out[i][0][-1], mode='answ2bert'))
+                    out_list.append(id2id(int(out[i][0][-1]), mode='answ2bert'))
                 for i in range(len(resp_len)):
                     temp_tokens[i][masked_pos[i][0]] = out_list[i]
                     segment_ids[i][masked_pos[i][0]+1] = 1
                     input_mask[i][masked_pos[i][0]+1] = 1
                     masked_pos[i][0] += 1
-                    masked_tokens[i][0] = id2id(tokens[i][masked_pos[i][0]], mode='bert2answ')
+                    masked_tokens[i][0] = id2id(int(tokens[i][masked_pos[i][0]]), mode='bert2answ')
                 temp_tokens, segment_ids, input_mask, masked_pos = tuple(temp_tokens), tuple(segment_ids), tuple(input_mask), tuple(masked_pos)
     return epoch_loss / count
 
+#生成器
+def epoch_test(ques, model, max_len):  # str list
+    pre_process(ques)
+    temp_tokens, segment_ids, input_mask, masked_pos = [], [], [], []
+    for i in range(len(ques)):
+        ques[i] = ''.join(ques[i])
+        token = tokenizer.encode(ques[i])[:max_len//2-1] + token_id(['[SEP]'])
+        num = len(token)
+        ids = [0]*(num) + [1]
+        mask = [1]*(num+1)
+        masked_pos.append([num])
+        n_pad = max_len - num - 1
+        token.extend([0]*(max_len - len(token)))
+        ids.extend([0]*n_pad)
+        mask.extend([0]*n_pad) 
+        temp_tokens.append(token)
+        segment_ids.append(ids)
+        input_mask.append(mask)
+    model.eval()
+    with torch.no_grad():
+        for t in range(max_len//2-1):
+            temp_tokens, segment_ids, input_mask, masked_pos = tuple(temp_tokens), tuple(segment_ids), tuple(input_mask), tuple(masked_pos)
+            output = model(temp_tokens, segment_ids, input_mask, masked_pos)
+            temp_tokens, segment_ids, input_mask, masked_pos = list(temp_tokens), list(segment_ids), list(input_mask), list(masked_pos)
+            if max(masked_pos)[0] == max_len - 1:
+                    break
+            out = np.argsort(output.cpu().detach().numpy())
+            out_list = []
+            for i in range(len(out)):
+                out_list.append(id2id(int(out[i][0][-1]), mode='answ2bert'))
+            for i in range(len(ques)):
+                temp_tokens[i][masked_pos[i][0]] = out_list[i]
+                segment_ids[i][masked_pos[i][0]+1] = 1
+                input_mask[i][masked_pos[i][0]+1] = 1
+                masked_pos[i][0] += 1
+        for i in range(len(temp_tokens)):
+            temp_tokens[i] = tokenizer.convert_ids_to_tokens(temp_tokens[i])
+            start = temp_tokens[i].index('[SEP]')
+            temp_tokens[i] = temp_tokens[i][start+1:]
+            if '[SEP]' in temp_tokens[i]:
+                end = temp_tokens[i].index('[SEP]')
+                temp_tokens[i] = temp_tokens[i][:end]
+            while '[PAD]' in temp_tokens[i]:
+                temp_tokens[i].remove('[PAD]')
+            while '[UNK]' in temp_tokens[i]:
+                temp_tokens[i].remove('[UNK]')
+            temp_tokens[i] = ''.join(temp_tokens[i])
+    return temp_tokens
+
 # def model_train(model,ques_t,answ_t,ques_v,answ_v,log_name,threshold,start,end,dict_op,loss_mode='gene'):
-def model_train(model, ques_t, answ_t, ques_v, answ_v, batch_size, max_len, learning_rate, epochs):
-#     log_file = '/home/'+user+'/CRG/self/'+log_name+'.txt'
-#     with open(log_file, 'w') as log_f:
-#         log_f.write('epoch, train_loss, valid_loss\n')
+def model_train(model, ques_t, answ_t, ques_v, answ_v, test_ques, batch_size, max_len, learning_rate, epochs):
+    log_file = '/home/dango/STC3/code/log1.txt'
+    with open(log_file, 'w') as log_f:
+        log_f.write('epoch, train_loss, valid_loss\n')
+    out_file = '/home/dango/STC3/code/out1.txt'
+    with open(out_file, 'w') as out_f:
+        out_f.write(str(test_ques) + '\n')
     optimizer = optim.Adam(model.parameters(),lr=learning_rate)
     scheduler = ReduceLROnPlateau(optimizer, factor=0.1, patience=2, verbose=True)
     stop = 0
@@ -435,19 +446,20 @@ def model_train(model, ques_t, answ_t, ques_v, answ_v, batch_size, max_len, lear
         valid_iterator = data_loader(ques_v,answ_v, batch_size, max_len)
 #         test_iterator = data_loader(ques_v,answ_v, batch_size, max_len)
         print('Epoch: ' + str(epoch+1))
-        train_loss = epoch_train(model, train_iterator, optimizer, epoch)
-        valid_loss = epoch_valid(model, valid_iterator)
+        train_loss = epoch_train(model, train_iterator, optimizer, epoch, max_len)
+        valid_loss = epoch_valid(model, valid_iterator, max_len)
         scheduler.step(valid_loss)
         loss_list.append(valid_loss)
-#         with open(log_file, 'a') as log_f:
-#             log_f.write('{epoch},{train_loss: 3.5f},{valid_loss: 3.5f}\n'.format(epoch=epoch+1, train_loss=train_loss, valid_loss=valid_loss))
+        with open(log_file, 'a') as log_f:
+            log_f.write('{epoch},{train_loss: 3.3f},{valid_loss: 3.3f}\n'.format(epoch=epoch+1, train_loss=train_loss, valid_loss=valid_loss))
         if valid_loss == min(loss_list):
             stop = 0
-#             if valid_loss < threshold:
-#                 test_xx = epoch_test(model, valid_iterator)
+            with open(out_file, 'a') as out_f:
+                out_f.write(str(epoch_test(test_ques, model, max_len)) + '\n')
         else:
             stop += 1
             if stop > 5:       # patience**2+1
                 break
 
-model_train(Final_model().to(device), ques, answ, ques, answ, 2, 64, 0.0001, 999)
+# model_train(Final_model().to(device), train_ques, train_answ, valid_ques, valid_answ, 256, 64, 0.0001, 999)
+model_train(Final_model().to(device), train_ques[:65535], train_answ[:65535], train_ques[:65535], train_answ[:65535], train_ques[20:28], 256, 64, 0.0001, 999)
