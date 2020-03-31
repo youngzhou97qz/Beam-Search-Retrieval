@@ -1,5 +1,6 @@
 # 暂无retrieval part
 
+import os
 import math
 import random
 import numpy as np
@@ -469,7 +470,7 @@ def epoch_test(ques, model, max_len):  # str list
             temp_tokens[i] = ''.join(temp_tokens[i])
     return temp_tokens
 
-def model_train(model, ques_t, answ_t, ques_v, answ_v, test_ques, batch_size, max_len, learning_rate, epochs):
+def model_train(model, mask_model, ques_t, answ_t, ques_v, answ_v, test_ques, batch_size, max_len, learning_rate, epochs):
     log_file = '/home/dango/STC3/code/log1.txt'
     with open(log_file, 'w') as log_f:
         log_f.write('epoch, train_loss, valid_loss\n')
@@ -481,8 +482,8 @@ def model_train(model, ques_t, answ_t, ques_v, answ_v, test_ques, batch_size, ma
     stop = 0
     loss_list = []
     for epoch in range(epochs):
-        train_iterator = data_loader(ques_t,answ_t, batch_size, max_len)
-        valid_iterator = data_loader(ques_v,answ_v, batch_size, max_len)
+        train_iterator = data_loader(ques_t,answ_t, batch_size, max_len, mask_model)
+        valid_iterator = data_loader(ques_v,answ_v, batch_size, max_len, mask_model)
         print('Epoch: ' + str(epoch+1))
         train_loss = epoch_train(model, train_iterator, optimizer, epoch, max_len)
         valid_loss = epoch_valid(model, valid_iterator, max_len)
@@ -494,10 +495,24 @@ def model_train(model, ques_t, answ_t, ques_v, answ_v, test_ques, batch_size, ma
             stop = 0
             with open(out_file, 'a') as out_f:
                 out_f.write(str(epoch_test(test_ques, model, max_len)) + '\n')
+            
+            if valid_loss < 1:
+                torch.save(model.state_dict(), os.path.join('/home/dango/STC3/code/', str(valid_loss)[:5]+'.pt'))
+                break
         else:
             stop += 1
             if stop > 5:       # patience**2+1
                 break
 
-# model_train(Final_model().to(device), train_ques, train_answ, valid_ques, valid_answ, valid_ques[128:136], 256, 64, 0.0001, 999)
-model_train(Final_model().to(device), valid_ques[:164], valid_answ[:164], valid_ques[156:164], valid_answ[156:164], valid_ques[156:164], 8, 64, 0.0001, 999)
+def load_model(model, model_file):
+    _model = model
+    state_dict = torch.load(model_file)
+    _model.load_state_dict(state_dict)
+    return _model
+
+
+# model_train(Final_model().to(device), mask_model, train_ques, train_answ, valid_ques, valid_answ, valid_ques[128:136], 256, 64, 0.0001, 999)
+model_train(Final_model().to(device), mask_model, valid_ques[:164], valid_answ[:164], valid_ques[156:164], valid_answ[156:164], valid_ques[156:164], 8, 64, 0.0001, 999)
+
+reloading = load_model(Final_model().to(device), '/home/dango/STC3/code/0.159.pt')
+print(str(epoch_test(valid_ques[156:164], reloading, 64)))
