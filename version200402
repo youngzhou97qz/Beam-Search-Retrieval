@@ -522,7 +522,7 @@ from gensim.summarization import bm25
 bm25_ques = bm25.BM25(train_ques + valid_ques)
 bm25_answ = bm25.BM25(train_answ + valid_answ)
 
-def epoch_test(ques, model_1, model_2, model_3, max_len, beam=2):  # str list
+def epoch_test(ques, model_1, model_2, model_3, max_len, beam=3):  # str list
     ques = pre_process(ques, punc)
     temp_tokens, segment_ids, input_mask, masked_pos, answers = [], [], [], [], []
     for i in range(len(ques)):
@@ -543,8 +543,8 @@ def epoch_test(ques, model_1, model_2, model_3, max_len, beam=2):  # str list
     model_2.eval()
     model_3.eval()
     with torch.no_grad():
-        for _ in range(max_len//2-1):
-            if max(masked_pos)[0] == max_len - 1:
+        for _ in tqdm(range(max_len//2-1)):
+            if max(masked_pos)[0] == max_len - 1 or min(lists.count(token_id(['[SEP]'])[0]) for lists in temp_tokens) >= 2:
                     break
             temp_tokens, segment_ids, input_mask, masked_pos = tuple(temp_tokens), tuple(segment_ids), tuple(input_mask), tuple(masked_pos)
             output = model_1(temp_tokens, segment_ids, input_mask, masked_pos) + model_2(temp_tokens, segment_ids, input_mask, masked_pos) + model_3(temp_tokens, segment_ids, input_mask, masked_pos)
@@ -577,7 +577,7 @@ def epoch_test(ques, model_1, model_2, model_3, max_len, beam=2):  # str list
                 segment_ids[i][masked_pos[i][0]+1] = 1
                 input_mask[i][masked_pos[i][0]+1] = 1
                 masked_pos[i][0] += 1
-    for i in range(len(ques)):
+    for i in tqdm(range(len(ques))):
         for j in range(beam):
             temp_tokens[i*beam+j] = tokenizer.convert_ids_to_tokens(temp_tokens[i*beam+j])
             start = temp_tokens[i*beam+j].index('[SEP]')
@@ -593,7 +593,7 @@ def epoch_test(ques, model_1, model_2, model_3, max_len, beam=2):  # str list
         answers.append(bm25(bm25_ques, bm25_answ, ques[i], temp_tokens[i*beam:(i+1)*beam]))
     return answers
 
-def bm25(bm25_ques, bm25_answ, question, answers, k=3):
+def bm25(bm25_ques, bm25_answ, question, answers, k=4):
     ques_scores = bm25_ques.get_scores(question)
     ques_max_k = heapq.nlargest(k, ques_scores)
     scores, indexes = [], []
@@ -608,4 +608,4 @@ def bm25(bm25_ques, bm25_answ, question, answers, k=3):
         scores.append(temp_score)
     return answers[scores.index(max(scores))]
 
-print(epoch_test(test, reloading,reloading,reloading, 64))
+print(epoch_test(test_ques, reloading,reloading,reloading, 64))
