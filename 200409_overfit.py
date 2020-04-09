@@ -526,9 +526,10 @@ def model_train(model, mask_model, ques_t, answ_t, test_ques, batch_size, max_le
             log_f.write('epoch, train_loss, valid_loss\n')
         with open(out_file, 'w') as out_f:
             out_f.write(str(test_ques) + '\n')
+        start = 0
     optimizer = optim.Adam(model.parameters(),lr=learning_rate)
     scheduler = ReduceLROnPlateau(optimizer, factor=0.1, patience=2, verbose=True)
-    start, stop = 0, 0
+    stop = 0
     loss_list = []
     for epoch in range(start, epochs):
         r = random.randint(0,len(ques_t)-VALID)
@@ -568,4 +569,4 @@ for i in range(40):
     test_ques.append(a[i][0][0])
 
 VALID = 16384
-model_train(Final_model().to(device), mask_model, questions, answers, test_ques, 256, 64, 0.001, 999, load=True)
+model_train(Final_model().to(device), mask_model, questions, answers, test_ques, 256, 64, 0.0001, 999, load=True)
