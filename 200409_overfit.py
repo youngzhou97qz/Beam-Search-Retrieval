@@ -516,14 +516,14 @@ def bm25(bm25_ques, bm25_answ, question, answers, k=4):
 
 import os
 def model_train(model, mask_model, ques_t, answ_t, test_ques, batch_size, max_len, learning_rate, epochs, load=False):
+    log_file = '/home/'+ser+'/STC3/result/log_anger.txt'
+    out_file = '/home/'+ser+'/STC3/result/out_anger.txt'
     if load == True:
         load_model(model, '/home/'+ser+'/STC3/result/7.844.pt')
         start = 5
     else:
-        log_file = '/home/'+ser+'/STC3/result/log_anger.txt'
         with open(log_file, 'w') as log_f:
             log_f.write('epoch, train_loss, valid_loss\n')
-        out_file = '/home/'+ser+'/STC3/result/out_anger.txt'
         with open(out_file, 'w') as out_f:
             out_f.write(str(test_ques) + '\n')
     optimizer = optim.Adam(model.parameters(),lr=learning_rate)
