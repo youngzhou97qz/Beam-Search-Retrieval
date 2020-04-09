@@ -17,23 +17,24 @@ tokenizer = BertTokenizer.from_pretrained(pretrained_weights)      # tokenizer.v
 token_id = tokenizer.convert_tokens_to_ids
 mask_model = BertForMaskedLM.from_pretrained('bert-base-chinese').to(device)
 mask_model.eval()
+ser = 'dango'
 
 # data part
 # reading data
 questions, answers, answer_ids = [], [], []
-f = open('/home/dango/STC3/data/questions.txt','r',encoding='gbk')
+f = open('/home/'+ser+'/STC3/data/questions.txt','r',encoding='gbk')
 lines = f.readlines()
 for line in lines:
     line = line.strip()
     questions.append(line)
 f.close()
-f = open('/home/dango/STC3/data/answers.txt','r',encoding='gbk')
+f = open('/home/'+ser+'/STC3/data/answers.txt','r',encoding='gbk')
 lines = f.readlines()
 for line in lines:
     line = line.strip()
     answers.append(line)
 f.close()
-f = open('/home/dango/STC3/data/answers_id.txt','r',encoding='gbk')
+f = open('/home/'+ser+'/STC3/data/answers_id.txt','r',encoding='gbk')
 lines = f.readlines()
 for line in lines:
     line = line.strip()
@@ -514,20 +515,24 @@ def bm25(bm25_ques, bm25_answ, question, answers, k=4):
     return answers[scores.index(max(scores))]
 
 import os
-def model_train(model, mask_model, ques_t, answ_t, test_ques, batch_size, max_len, learning_rate, epochs):
-    log_file = '/home/dango/STC3/result/log_anger.txt'
-    with open(log_file, 'w') as log_f:
-        log_f.write('epoch, train_loss, valid_loss\n')
-    out_file = '/home/dango/STC3/result/out_anger.txt'
-    with open(out_file, 'w') as out_f:
-        out_f.write(str(test_ques) + '\n')
+def model_train(model, mask_model, ques_t, answ_t, test_ques, batch_size, max_len, learning_rate, epochs, load=False):
+    if load == True:
+        load_model(model, '/home/'+ser+'/STC3/result/7.844.pt')
+        start = 5
+    else:
+        log_file = '/home/'+ser+'/STC3/result/log_anger.txt'
+        with open(log_file, 'w') as log_f:
+            log_f.write('epoch, train_loss, valid_loss\n')
+        out_file = '/home/'+ser+'/STC3/result/out_anger.txt'
+        with open(out_file, 'w') as out_f:
+            out_f.write(str(test_ques) + '\n')
     optimizer = optim.Adam(model.parameters(),lr=learning_rate)
     scheduler = ReduceLROnPlateau(optimizer, factor=0.1, patience=2, verbose=True)
-    stop = 0
+    start, stop = 0, 0
     loss_list = []
-    for epoch in range(epochs):
+    for epoch in range(start, epochs):
         r = random.randint(0,len(ques_t)-VALID)
-        train_iterator = data_loader(ques_t[:r]+ques_t[r+VALID:],answ_t[:r]+answ_t[r+VALID:], batch_size, max_len, mask_model)
+        train_iterator = data_loader(ques_t,answ_t, batch_size, max_len, mask_model)
         valid_iterator = data_loader(ques_t[r:r+VALID],answ_t[r:r+VALID], batch_size, max_len, mask_model)
         print('Epoch: ' + str(epoch+1))
         train_loss = epoch_train(model, train_iterator, optimizer, epoch, max_len)
@@ -541,20 +546,26 @@ def model_train(model, mask_model, ques_t, answ_t, test_ques, batch_size, max_le
             with open(out_file, 'a') as out_f:
                 out_f.write(str(valid_loss)[:5] + '\n')
                 out_f.write(str(epoch_test(test_ques, model, 64)) + '\n')
-            torch.save(model.state_dict(), os.path.join('/home/dango/STC3/result/', str(valid_loss)[:5]+'.pt'))
+            torch.save(model.state_dict(), os.path.join('/home/'+ser+'/STC3/result/', str(valid_loss)[:5]+'.pt'))
         else:
             stop += 1
             if stop > 5:       # patience**2+1
                 break
 
+def load_model(model, model_file):
+    _model = model
+    state_dict = torch.load(model_file)
+    _model.load_state_dict(state_dict)
+    return _model
+
 # 导出test 问句
 import json
 test_ques = []
-with open('/home/dango/STC3/result/TUA1_1_TokushimaUniversity_base.json', 'r') as f:
+with open('/home/'+ser+'/STC3/result/TUA1_1_TokushimaUniversity_base.json', 'r') as f:
     for line in f:
         a = json.loads(line)
 for i in range(40):
     test_ques.append(a[i][0][0])
 
-VALID = 20750
-model_train(Final_model().to(device), mask_model, questions, answers, test_ques, 256, 64, 0.0001, 999)
+VALID = 16384
+model_train(Final_model().to(device), mask_model, questions, answers, test_ques, 256, 64, 0.001, 999, load=True)
