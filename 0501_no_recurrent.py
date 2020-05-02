@@ -374,13 +374,105 @@ def epoch_train(model, iterator, optimizer, epoch, max_len, clip=True): #词汇�
 #         loss.backward()
         with amp.scale_loss(loss, optimizer) as scaled_loss:
             scaled_loss.backward()
-        if clip:
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+#         if clip:
+#             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         count += 1
         epoch_loss += loss.item()
         iter_bar.set_description('loss=%3.3f'%loss.item())
     return epoch_loss / count
+
+# BEAM Search
+import copy
+import heapq
+from gensim.summarization import bm25
+bm25_ques = bm25.BM25(questions)
+bm25_answ = bm25.BM25(answers)
+
+def epoch_test(ques, emot, model_1, max_len, beam=3):  # str list
+    ques = pre_process(ques, punc)
+    temp_tokens, segment_ids, input_mask, masked_pos, answers = [], [], [], [], []
+    for i in range(len(ques)):
+        token = [emot[i]] + token_id(['[SEP]']) + tokenizer.encode(ques[i])[:max_len//2-2] + token_id(['[SEP]'])
+        num = len(token)
+        ids = [0]*2 + [1]*(num-2) + [2]
+        mask = [1]*(num+1)
+        n_pad = max_len - num - 1
+        token.extend([0]*(n_pad+1))
+        ids.extend([0]*n_pad)
+        mask.extend([0]*n_pad)
+        for _ in range(beam):
+            temp_tokens.append(copy.deepcopy(token))
+            segment_ids.append(ids)
+            input_mask.append(mask)
+            masked_pos.append([num])
+    model_1.eval()
+    with torch.no_grad():
+        for _ in range(max_len//2-2):
+            if max(masked_pos)[0] == max_len - 1 or min(lists.count(token_id(['[SEP]'])[0]) for lists in temp_tokens) >= 3:
+                    break
+            temp_tokens, segment_ids, input_mask, masked_pos = tuple(temp_tokens), tuple(segment_ids), tuple(input_mask), tuple(masked_pos)
+            output = model_1(temp_tokens, segment_ids, input_mask, masked_pos)
+            temp_tokens, segment_ids, input_mask, masked_pos = list(temp_tokens), list(segment_ids), list(input_mask), list(masked_pos)
+            out = np.argsort(output.cpu().detach().numpy())
+            scores = [0]*len(temp_tokens)
+            k_tokens, k_scores = [], []
+            for i in range(len(temp_tokens)):
+                for j in range(beam):
+                    k_tokens.append(int(out[i][0][-1-j]))
+                    k_scores.append(F.softmax(output.cpu().detach(), dim=-1).numpy()[i][0][int(out[i][0][-1-j])])
+            for i in range(0,len(k_tokens),beam*beam):
+                temp_list = [(score, token) for score, token in zip(k_scores[i:i+beam*beam], k_tokens[i:i+beam*beam])]
+                temp_list.sort(key = lambda i: i[0], reverse=True)
+                k_scores[i:i+beam*beam] = [score for score, token in temp_list]
+                k_tokens[i:i+beam*beam] = [token for score, token in temp_list]
+            for i in range(len(scores)):
+                count = 0
+                if i % beam != 0:
+                    if scores[i] + k_scores[i//beam*beam*beam+i%beam+count] == scores[i-1]:
+                        count += 1
+                        scores[i] += k_scores[i//beam*beam*beam+i%beam+count]
+                        temp_tokens[i][masked_pos[i][0]] = k_tokens[i//beam*beam*beam+i%beam+count]
+                    else:
+                        scores[i] += k_scores[i//beam*beam*beam+i%beam+count]
+                        temp_tokens[i][masked_pos[i][0]] = k_tokens[i//beam*beam*beam+i%beam+count]
+                else:
+                    scores[i] += k_scores[i*beam]
+                    temp_tokens[i][masked_pos[i][0]] = k_tokens[i*beam]
+                segment_ids[i][masked_pos[i][0]+1] = 1
+                input_mask[i][masked_pos[i][0]+1] = 1
+                masked_pos[i][0] += 1
+    for i in range(len(ques)):
+        for j in range(beam):
+            temp_tokens[i*beam+j] = token_to(temp_tokens[i*beam+j])
+            start = temp_tokens[i*beam+j][2:].index('[SEP]')
+            temp_tokens[i*beam+j] = temp_tokens[i*beam+j][start+3:]
+            if '[SEP]' in temp_tokens[i*beam+j]:
+                end = temp_tokens[i*beam+j].index('[SEP]')
+                temp_tokens[i*beam+j] = temp_tokens[i*beam+j][:end]
+            while '[PAD]' in temp_tokens[i*beam+j]:
+                temp_tokens[i*beam+j].remove('[PAD]')
+            while '[UNK]' in temp_tokens[i*beam+j]:
+                temp_tokens[i*beam+j].remove('[UNK]')
+            temp_tokens[i*beam+j] = ''.join(temp_tokens[i*beam+j])
+            temp_tokens[i*beam+j] = temp_tokens[i*beam+j].replace('##','')
+        answers.append(bm25(bm25_ques, bm25_answ, ques[i], temp_tokens[i*beam:(i+1)*beam]))
+    return answers
+
+def bm25(bm25_ques, bm25_answ, question, answers, k=4):
+    ques_scores = bm25_ques.get_scores(question)
+    ques_max_k = heapq.nlargest(k, ques_scores)
+    scores, indexes = [], []
+    for i in range(len(ques_scores)):
+        if ques_scores[i] in ques_max_k:
+            indexes.append(i)
+    for i in range(len(answers)):
+        temp_score = 0
+        answ_scores = bm25_answ.get_scores(answers[i])
+        for index in indexes:
+            temp_score += ques_scores[index] * answ_scores[index]
+        scores.append(temp_score)
+    return answers[scores.index(max(scores))]
 
 import os
 def model_train(model, ques_t, answ_t, ids_t, test_ques, test_ids, batch_size, max_len, learning_rate, epochs, mask_model, load=False):
@@ -392,9 +484,9 @@ def model_train(model, ques_t, answ_t, ids_t, test_ques, test_ids, batch_size, m
     else:
         with open(log_file, 'w') as log_f:
             log_f.write('epoch, train_loss\n')
-#         with open(out_file, 'w') as out_f:
-#             out_f.write(str(test_ques) + '\n')
-#             out_f.write(str(answ_t) + '\n')
+        with open(out_file, 'w') as out_f:
+            out_f.write(str(test_ques) + '\n')
+            out_f.write(str(answ_t) + '\n')
         start = 0
     optimizer = optim.Adam(model.parameters(),lr=learning_rate)
     model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
@@ -412,9 +504,9 @@ def model_train(model, ques_t, answ_t, ids_t, test_ques, test_ids, batch_size, m
         if train_loss == min(loss_list):
             stop = 0
             with open(out_file, 'a') as out_f:
-#                 out_f.write(str(train_loss)[:5] + '\n')
-#                 out_f.write(str(epoch_test(test_ques, test_ids, model, 66)) + '\n')
-            torch.save(model.state_dict(), os.path.join('/home/'+ser+'/STC3/result/', str(valid_loss)[:5]+'.pt'))
+                out_f.write(str(train_loss)[:5] + '\n')
+                out_f.write(str(epoch_test(test_ques, test_ids, model, 66)) + '\n')
+            torch.save(model.state_dict(), os.path.join('/home/'+ser+'/STC3/result/', str(train_loss)[:5]+'.pt'))
         else:
             stop += 1
             if stop > 5:       # patience**2+1
@@ -426,7 +518,7 @@ def load_model(model, model_file):
     _model.load_state_dict(state_dict)
     return _model
 
-# 导出test 问句
+# # 导出test 问句
 # import json
 # test_ques = []
 # with open('/home/'+ser+'/STC3/result/TUA1_1_TokushimaUniversity_base.json', 'r') as f:
@@ -435,4 +527,4 @@ def load_model(model, model_file):
 # for i in range(40):
 #     test_ques.append(a[i][0][0])
 
-model_train(Final_model().to(device), questions, answers, answer_ids, questions[:1], answer_ids[:1], 512, 66, 0.0001, 999, mask_model=None)
+model_train(Final_model().to(device), questions, answers, answer_ids, questions[:2], answer_ids[:2], 1024, 66, 0.0001, 999, mask_model=None)
