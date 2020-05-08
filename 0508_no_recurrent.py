@@ -18,8 +18,8 @@ pretrained_weights = 'bert-base-chinese'
 tokenizer = BertTokenizer.from_pretrained(pretrained_weights)      # tokenizer.vocab_size = 21128
 token_id = tokenizer.convert_tokens_to_ids
 token_to = tokenizer.convert_ids_to_tokens
-# mask_model = BertForMaskedLM.from_pretrained('bert-base-chinese').to(device)
-# mask_model.eval()
+mask_model = BertForMaskedLM.from_pretrained('bert-base-chinese').to(device)
+mask_model.eval()
 ser = 'yzhou'
 MAX_LEN = 66
 
@@ -118,11 +118,11 @@ answers = pre_process(answers, punc)
 # print(questions[:5])
 # print(answers[:5])
 
-# QUES_RATE = 0.1
-# ANSW_RATE = 0.4
+QUES_RATE = 0.1
+ANSW_RATE = 0.3
 
 # using BERT to replace characters
-def prediction_replace(sentence, model, rate, max_len):
+def prediction_replace(sentence, model, max_len, rate):
     output_text = tokenizer.tokenize(sentence)
     num = int(len(output_text)//((max_len-1)/((max_len-1)*rate+1)))
     if num > 0:
@@ -156,7 +156,9 @@ def truncate_tokens(tokens_a, tokens_b, max_len):
         else:
             tokens_b.pop()
 
-def data_loader(ques, answ, ids, batch_size, max_len, model=None):
+def data_loader(epoch, ques, answ, ids, batch_size, max_len, model=mask_model):
+    samp = 5/(4+math.exp(epoch/5))
+    print('teacher force rate: %3.3f'%samp)
     state = np.random.get_state()
     np.random.shuffle(ques)
     np.random.set_state(state)
@@ -164,11 +166,17 @@ def data_loader(ques, answ, ids, batch_size, max_len, model=None):
     np.random.set_state(state)
     np.random.shuffle(ids)
     batch = []
-    for i in range(len(questions)):
-        part1 = tokenizer.encode(questions[i])
-        part2 = tokenizer.encode(answers[i])  # 先不改！！！！！！
+    for i in range(len(ques)):
+        if random.random() < samp:
+            part1 = tokenizer.encode(ques[i])
+        else:
+            part1 = tokenizer.encode(prediction_replace(ques[i], model, max_len-34, rate=QUES_RATE))
+        if random.random() < samp:
+            part2 = tokenizer.encode(answ[i])
+        else:
+            part2 = tokenizer.encode(prediction_replace(answ[i], model, max_len-34, rate=ANSW_RATE))
         truncate_tokens(part1, part2, max_len-4)
-        tokens = [answer_ids[i]] + token_id(['[SEP]']) + part1 + token_id(['[SEP]']) + part2 + token_id(['[SEP]'])
+        tokens = [ids[i]] + token_id(['[SEP]']) + part1 + token_id(['[SEP]']) + part2 + token_id(['[SEP]'])
         for j in range(len(part2)+1):
             num = len(part1)+3+j
             temp_tokens = tokens[:num]
@@ -475,9 +483,9 @@ def bm25(bm25_ques, bm25_answ, question, answers, k=4):
     return answers[scores.index(max(scores))]
 
 import os
-def model_train(model, ques_t, answ_t, ids_t, test_ques, test_ids, batch_size, max_len, learning_rate, epochs, mask_model, load=False):
-    log_file = '/home/'+ser+'/STC3/result/log_0501.txt'
-    out_file = '/home/'+ser+'/STC3/result/out_0501.txt'
+def model_train(model, ques_t, answ_t, ids_t, test_ques, test_ids, batch_size, max_len, learning_rate, epochs, mask_model=mask_model, load=False):
+    log_file = '/home/'+ser+'/STC3/result/log_0508.txt'
+    out_file = '/home/'+ser+'/STC3/result/out_0508.txt'
     if load == True:
         load_model(model, '/home/'+ser+'/STC3/result/4.699.pt')
         start = 22
@@ -486,7 +494,7 @@ def model_train(model, ques_t, answ_t, ids_t, test_ques, test_ids, batch_size, m
             log_f.write('epoch, train_loss\n')
         with open(out_file, 'w') as out_f:
             out_f.write(str(test_ques) + '\n')
-            out_f.write(str(answ_t) + '\n')
+            out_f.write(str(answ_t[:2]) + '\n')
         start = 0
     optimizer = optim.Adam(model.parameters(),lr=learning_rate)
     model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
@@ -494,7 +502,7 @@ def model_train(model, ques_t, answ_t, ids_t, test_ques, test_ids, batch_size, m
     stop = 0
     loss_list = []
     for epoch in range(start, epochs):
-        train_iterator = data_loader(ques_t, answ_t, ids_t, batch_size, max_len, mask_model)
+        train_iterator = data_loader(epoch, ques_t, answ_t, ids_t, batch_size, max_len, mask_model)
         print('Epoch: ' + str(epoch+1))
         train_loss = epoch_train(model, train_iterator, optimizer, epoch, max_len)
         scheduler.step(train_loss)
@@ -506,7 +514,8 @@ def model_train(model, ques_t, answ_t, ids_t, test_ques, test_ids, batch_size, m
             with open(out_file, 'a') as out_f:
                 out_f.write(str(train_loss)[:5] + '\n')
                 out_f.write(str(epoch_test(test_ques, test_ids, model, 66)) + '\n')
-            torch.save(model.state_dict(), os.path.join('/home/'+ser+'/STC3/result/', str(train_loss)[:5]+'.pt'))
+            if train_loss < 5:
+                torch.save(model.state_dict(), os.path.join('/home/'+ser+'/STC3/result/', str(train_loss)[:5]+'.pt'))
         else:
             stop += 1
             if stop > 5:       # patience**2+1
@@ -527,4 +536,4 @@ def load_model(model, model_file):
 # for i in range(40):
 #     test_ques.append(a[i][0][0])
 
-model_train(Final_model().to(device), questions, answers, answer_ids, questions[:2], answer_ids[:2], 1024, 66, 0.0001, 999, mask_model=None)
+model_train(Final_model().to(device), questions, answers, answer_ids, questions[:10], answer_ids[:10], 1024, 66, 0.0001, 999)
