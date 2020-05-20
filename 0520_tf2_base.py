@@ -17,7 +17,7 @@ pre_tokenizer = BertTokenizer.from_pretrained(pretrained_weights)      # tokeniz
 
 #  parameters
 maxlen = 64
-batch_size = 2048
+batch_size = 128
 epochs = 99999
 ser = 'dango'
 
@@ -202,7 +202,7 @@ class Evaluate(keras.callbacks.Callback):
     def on_epoch_end(self, epoch, logs=None):
         if logs['loss'] <= self.lowest:
             self.lowest = logs['loss']
-            if self.lowest < 1:
+            if self.lowest < 4:
                 model.save_weights(os.path.join('/home/'+ser+'/STC3/result/', str(self.lowest)[:5]+'.weights'))  # 保存最优
                 just_show(self.lowest)  # 演示效果
 
